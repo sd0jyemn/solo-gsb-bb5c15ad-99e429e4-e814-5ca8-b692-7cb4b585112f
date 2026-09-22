@@ -53,6 +53,15 @@ class Settings:
     resample_points: int = field(
         default_factory=lambda: int(_float_env("RESAMPLE_POINTS", 32))
     )
+    # 候选字识别：漏写一笔（参考笔无人对应）的显式惩罚。
+    # 单笔匹配代价 ∈ [0,1]，1.0 等价于“这一笔完全写错”。
+    recognize_missing_penalty: float = field(
+        default_factory=lambda: _float_env("RECOG_MISSING_PENALTY", 1.0)
+    )
+    # 候选字识别：多写一笔（用户笔无参考对应）的显式惩罚
+    recognize_extra_penalty: float = field(
+        default_factory=lambda: _float_env("RECOG_EXTRA_PENALTY", 1.0)
+    )
 
 
 settings = Settings()

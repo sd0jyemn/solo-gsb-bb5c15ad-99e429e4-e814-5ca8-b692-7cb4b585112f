@@ -243,3 +243,153 @@ def test_degenerate_stroke_rejected(client):
     payload = _validate_payload("sub-bad-3", [[[1.0, 1.0]]])
     r = client.post("/v1/validate", json=payload)
     assert r.status_code == 422
+
+
+# ------------------------------------------------------------------ 候选字识别
+
+# “一”：单横
+REF_YI = [[[100.0, 200.0], [300.0, 200.0]]]
+# “二”：短横 + 长横
+REF_ER = [
+    [[120.0, 130.0], [280.0, 130.0]],
+    [[100.0, 250.0], [300.0, 250.0]],
+]
+
+
+def _register_recognize_fixtures(client):
+    client.put("/v1/references/一", json={"character": "一", "strokes": REF_YI})
+    client.put("/v1/references/二", json={"character": "二", "strokes": REF_ER})
+    client.put("/v1/references/十", json={"character": "十", "strokes": REF_SHI})
+
+
+def test_recognize_empty_without_references(client):
+    r = client.post("/v1/recognize", json={"strokes": REF_SHI, "top_k": 3})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["candidates"] == []
+    assert body["total_references"] == 0
+
+
+def test_recognize_perfect_match_ranks_first(client):
+    _register_recognize_fixtures(client)
+    r = client.post("/v1/recognize", json={"strokes": REF_SHI, "top_k": 3})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["total_references"] == 3
+    assert len(body["candidates"]) == 3
+    top = body["candidates"][0]
+    assert top["character"] == "十"
+    assert top["score"] == 100.0
+    assert top["matched_stroke_count"] == 2
+    # 笔画对应：用户笔 i ↔ 参考笔 i，代价为 0
+    by_user = {c["user_stroke_index"]: c for c in top["correspondences"]}
+    assert by_user[0]["reference_stroke_index"] == 0
+    assert by_user[1]["reference_stroke_index"] == 1
+    assert by_user[0]["cost"] == 0.0
+    assert top["penalties"]["missing_count"] == 0
+    assert top["penalties"]["extra_count"] == 0
+    # 分数单调不升
+    scores = [c["score"] for c in body["candidates"]]
+    assert scores == sorted(scores, reverse=True)
+
+
+def test_recognize_tolerates_wrong_order(client):
+    _register_recognize_fixtures(client)
+    # 先竖后横：与“十”内容相同、次序相反
+    r = client.post(
+        "/v1/recognize", json={"strokes": [REF_SHI[1], REF_SHI[0]], "top_k": 1}
+    )
+    top = r.json()["candidates"][0]
+    assert top["character"] == "十"
+    assert top["score"] == 100.0
+    by_user = {c["user_stroke_index"]: c for c in top["correspondences"]}
+    assert by_user[0]["reference_stroke_index"] == 1  # 用户竖 → 参考竖(1)
+    assert by_user[1]["reference_stroke_index"] == 0  # 用户横 → 参考横(0)
+
+
+def test_recognize_missing_stroke_penalized(client):
+    _register_recognize_fixtures(client)
+    # 只写一横：更接近“一”，对“十”则缺一笔
+    r = client.post("/v1/recognize", json={"strokes": REF_YI, "top_k": 3})
+    by_char = {c["character"]: c for c in r.json()["candidates"]}
+    assert by_char["一"]["score"] == 100.0
+    shi = by_char["十"]
+    assert shi["penalties"]["missing_count"] == 1
+    assert shi["penalties"]["missing_stroke_indices"] == [1]
+    assert shi["penalties"]["missing_penalty_total"] == 1.0
+    assert shi["matched_stroke_count"] == 1
+    assert shi["score"] == 50.0
+    assert by_char["一"]["score"] > shi["score"]
+
+
+def test_recognize_extra_stroke_penalized(client):
+    _register_recognize_fixtures(client)
+    extra_dot = [[50.0, 60.0], [60.0, 50.0]]
+    r = client.post(
+        "/v1/recognize", json={"strokes": [*REF_SHI, extra_dot], "top_k": 3}
+    )
+    top = r.json()["candidates"][0]
+    assert top["character"] == "十"
+    p = top["penalties"]
+    assert p["extra_count"] == 1
+    assert p["extra_stroke_indices"] == [2]
+    assert p["extra_penalty_total"] == 1.0
+    # 两笔完美 + 一笔多笔：1 - 1/3
+    assert top["score"] == 66.67
+    extra_corr = [
+        c for c in top["correspondences"] if c["user_stroke_index"] == 2
+    ][0]
+    assert extra_corr["reference_stroke_index"] is None
+
+
+def test_recognize_top_k_truncates(client):
+    _register_recognize_fixtures(client)
+    r = client.post("/v1/recognize", json={"strokes": REF_SHI, "top_k": 2})
+    body = r.json()
+    assert body["top_k"] == 2
+    assert len(body["candidates"]) == 2
+    assert body["total_references"] == 3
+
+
+def test_recognize_top_k_larger_than_catalog(client):
+    _register_recognize_fixtures(client)
+    r = client.post("/v1/recognize", json={"strokes": REF_SHI, "top_k": 10})
+    assert len(r.json()["candidates"]) == 3
+
+
+def test_recognize_invalid_top_k_422(client):
+    _register_recognize_fixtures(client)
+    assert client.post(
+        "/v1/recognize", json={"strokes": REF_SHI, "top_k": 0}
+    ).status_code == 422
+    assert client.post(
+        "/v1/recognize", json={"strokes": REF_SHI, "top_k": -1}
+    ).status_code == 422
+    assert client.post(
+        "/v1/recognize", json={"strokes": REF_SHI, "top_k": 2.5}
+    ).status_code == 422
+
+
+def test_recognize_empty_strokes_422(client):
+    _register_recognize_fixtures(client)
+    r = client.post("/v1/recognize", json={"strokes": [], "top_k": 3})
+    assert r.status_code == 422
+
+
+def test_recognize_tie_break_is_stable(client):
+    _register_recognize_fixtures(client)
+    # 构造两个笔画完全相同的参考字：任何输入下二者分数都相同
+    client.put(
+        "/v1/references/乙",
+        json={"character": "乙", "strokes": REF_SHI, "source": "dup"},
+    )
+    r1 = client.post("/v1/recognize", json={"strokes": REF_SHI, "top_k": 5})
+    r2 = client.post("/v1/recognize", json={"strokes": REF_SHI, "top_k": 5})
+    chars1 = [c["character"] for c in r1.json()["candidates"]]
+    chars2 = [c["character"] for c in r2.json()["candidates"]]
+    assert chars1 == chars2  # 重复请求顺序一致
+    # 同分候选用字符稳定排序：码序 “乙” < “十”
+    top_score = r1.json()["candidates"][0]["score"]
+    tied = [c["character"] for c in r1.json()["candidates"]
+            if c["score"] == top_score]
+    assert tied == ["乙", "十"]

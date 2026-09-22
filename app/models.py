@@ -144,6 +144,69 @@ class ReferenceResponse(BaseModel):
     updated_at: str
 
 
+# ------------------------------------------------------------ 候选字识别
+
+class RecognizeRequest(BaseModel):
+    """候选字识别请求：在全部已注册参考字中为未标注轨迹寻找候选。"""
+
+    strokes: list[Stroke] = Field(
+        min_length=1, description="用户书写轨迹（不要求按参考笔顺）",
+    )
+    top_k: int = Field(
+        ge=1, le=100, description="返回候选数量上限，按置信度降序",
+    )
+    canvas_size: Optional[Point] = Field(
+        default=None,
+        description="画布宽高 [w, h]；缺省时以各参考字外接框分别归一化",
+    )
+
+
+class StrokeCorrespondence(BaseModel):
+    user_stroke_index: int = Field(description="用户笔画下标（0 起，按书写次序）")
+    reference_stroke_index: Optional[int] = Field(
+        description="分配到的参考笔画下标（0 起）；null 表示多笔（无对应参考笔）",
+    )
+    cost: float = Field(ge=0.0, le=1.0, description="该配对的归一化代价 0-1")
+    metrics: Optional[StrokeMetrics] = None
+
+
+class CandidatePenalties(BaseModel):
+    missing_count: int = Field(description="缺笔数：参考笔中无对应用户笔的数量")
+    extra_count: int = Field(description="多笔数：用户笔中无对应参考笔的数量")
+    missing_stroke_indices: list[int] = Field(description="未匹配的参考笔画下标")
+    extra_stroke_indices: list[int] = Field(description="未匹配的用户笔画下标")
+    missing_penalty_per_stroke: float
+    extra_penalty_per_stroke: float
+    matched_cost_total: float = Field(description="已配对笔画的代价之和")
+    missing_penalty_total: float = Field(description="缺笔惩罚合计")
+    extra_penalty_total: float = Field(description="多笔惩罚合计")
+    total_cost: float = Field(
+        description="总代价 = 已配对代价 + 缺笔惩罚 + 多笔惩罚",
+    )
+
+
+class RecognitionCandidate(BaseModel):
+    character: str
+    score: float = Field(
+        ge=0.0, le=100.0, description="置信度得分 0-100，越高越相似",
+    )
+    reference_stroke_count: int
+    user_stroke_count: int
+    matched_stroke_count: int
+    correspondences: list[StrokeCorrespondence] = Field(
+        description="最优一对一分配下的笔画对应关系",
+    )
+    penalties: CandidatePenalties
+
+
+class RecognizeResponse(BaseModel):
+    top_k: int
+    total_references: int = Field(description="参与比对的已注册参考字数量")
+    candidates: list[RecognitionCandidate] = Field(
+        description="按置信度降序的候选；同分按字符稳定排序",
+    )
+
+
 class SubmissionRecord(BaseModel):
     submission_id: str
     request_hash: str

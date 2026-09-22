@@ -133,6 +133,17 @@ def _matches_reference(
     return ok
 
 
+def compare_stroke(
+    reference: geo.Polyline, user: geo.Polyline, tol: Tolerances, resample_n: int
+) -> tuple[bool, list[str], dict, float]:
+    """单笔比对的公共入口（归一化坐标输入），供识别引擎构建代价矩阵复用。
+
+    与内部 _compare_stroke 相同：返回 (passed, reasons, metrics, score)，
+    参数顺序与 validate() 中 (reference, user) 保持一致。
+    """
+    return _compare_stroke(reference, user, tol, resample_n)
+
+
 # ---------------------------------------------------------------- 整体匹配
 
 _REASON_MESSAGES = {

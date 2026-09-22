@@ -4,6 +4,10 @@
 按**笔画方向、起止点、书写顺序**做归一化匹配，支持**可配置的分叉/转折笔画容差**，
 返回**首个不合格笔画、偏差原因与整体得分**。同一提交幂等。
 
+此外提供**候选字识别**（`POST /v1/recognize`）：输入未标注字符的笔画轨迹，
+在全部已注册参考字中按置信度返回 top-k 候选，通过全局一对一最优分配容忍书写次序差异，
+并把缺笔/多笔作为显式惩罚纳入总分。
+
 ## 快速启动
 
 ### Docker Compose（推荐）
@@ -36,8 +40,82 @@ pytest tests/ -q
 | `GET` | `/v1/config` | 查看服务端默认容差 |
 | `PUT` | `/v1/references/{character}` | 注册/更新某汉字的参考笔画序列 |
 | `GET` | `/v1/references/{character}` | 查询参考笔画 |
+| `POST` | `/v1/recognize` | 候选字识别：未标注轨迹 → top-k 候选 |
 | `POST` | `/v1/validate` | 校验一次书写提交（幂等） |
 | `GET` | `/v1/submissions/{submission_id}` | 按幂等键查询历史结果 |
+
+### 示例：候选字识别
+
+```bash
+# 先注册若干参考字（沿用 PUT /v1/references/{character}）
+curl -X PUT http://localhost:8000/v1/references/十 \
+  -H 'Content-Type: application/json' \
+  -d '{"character":"十","strokes":[[[100,200],[300,200]],[[200,100],[200,300]]]}'
+
+# 提交一段未标注字符的轨迹（即使笔顺与参考不同也能识别）
+curl -X POST http://localhost:8000/v1/recognize \
+  -H 'Content-Type: application/json' \
+  -d '{
+        "strokes": [[[201,99],[199,301]], [[102,198],[298,203]]],
+        "top_k": 3
+      }'
+```
+
+请求字段：
+
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `strokes` | 是 | 用户书写轨迹（每笔 ≥2 个点）；**不要求按参考笔顺书写** |
+| `top_k` | 是 | 返回候选数上限，整数且 `1 ≤ top_k ≤ 100`；非法值返回 `422` |
+| `canvas_size` | 否 | `[w, h]`，缺省时各参考字按自身外接框分别归一化 |
+
+响应：没有任何已注册参考字时 `candidates` 为空列表；`total_references`
+报告参与比对的参考字总数，候选数不超过 `top_k`。
+
+```json
+{
+  "top_k": 3,
+  "total_references": 4,
+  "candidates": [
+    {
+      "character": "十",
+      "score": 100.0,
+      "reference_stroke_count": 2,
+      "user_stroke_count": 2,
+      "matched_stroke_count": 2,
+      "correspondences": [
+        {"user_stroke_index": 0, "reference_stroke_index": 1, "cost": 0.0,
+         "metrics": {"start_deviation": 0.0, "end_deviation": 0.0,
+                      "direction_deviation_deg": 0.0, "shape_deviation": 0.0,
+                      "is_forked": false}},
+        {"user_stroke_index": 1, "reference_stroke_index": 0, "cost": 0.0,
+         "metrics": { "...": "..." }}
+      ],
+      "penalties": {
+        "missing_count": 0,
+        "extra_count": 0,
+        "missing_stroke_indices": [],
+        "extra_stroke_indices": [],
+        "missing_penalty_per_stroke": 1.0,
+        "extra_penalty_per_stroke": 1.0,
+        "matched_cost_total": 0.0,
+        "missing_penalty_total": 0.0,
+        "extra_penalty_total": 0.0,
+        "total_cost": 0.0
+      }
+    }
+  ]
+}
+```
+
+- `score`：置信度 `0..100`，越高越相似；候选按 `score` 降序，**同分按字符稳定排序**。
+- `correspondences`：最优一对一分配下的笔画对应关系；`reference_stroke_index` 为
+  `null` 表示该用户笔是**多笔**（无对应参考笔）。
+- `penalties`：缺笔/多笔惩罚明细——缺笔下标、多笔下标、单笔惩罚值与各项合计，
+  `total_cost = matched_cost_total + missing_penalty_total + extra_penalty_total`。
+
+缺笔/多笔示例（只写一横去匹配“十”）：`matched_stroke_count=1`、
+`missing_count=1`、`missing_stroke_indices=[1]`、`score=50.0`。
 
 ### 示例：校验“十”字
 
@@ -116,6 +194,25 @@ curl -X POST http://localhost:8000/v1/validate \
 5. **计分**：单笔按四项指标在 2 倍容差内线性衰减加权（起点 20% / 终点 20% / 方向 30% / 形状 30%），
    整体分 = 单笔均分 × 笔画覆盖率（缺笔/多笔均扣分）。
 
+### 候选字识别算法（`/v1/recognize`）
+
+识别不预设目标字、也不假设笔顺，对每个已注册参考字独立打分：
+
+1. **归一化与重采样**：与校验一致的外接框/画布归一化与 32 点弧长重采样。
+2. **代价矩阵**：第 *i* 用户笔与第 *j* 参考笔的单笔代价
+   `cost = 1 - 单笔得分/100`（复用上面的四指标加权与分叉笔画容差），范围 `0..1`。
+3. **全局一对一最优分配**：在用户笔与参考笔之间求最小权完美匹配
+   （O(n³) 匈牙利算法），因此**书写次序与参考不同也能正确配对**——
+   这是全局最优，按书写次序贪心配对会失败的场景也能处理。
+4. **缺笔/多笔显式惩罚**：把矩阵用虚拟槽扩成边长
+   `max(用户笔数, 参考笔数)` 的方阵：参考笔未被对应用户笔匹配即**缺笔**，
+   用户笔未被参考笔匹配即**多笔**，每条虚拟边按固定代价（默认 `1.0`，
+   `RECOG_MISSING_PENALTY` / `RECOG_EXTRA_PENALTY` 可调）计入总代价。
+5. **置信度**：`score = 100 × max(0, 1 − total_cost / max(两笔数))`，
+   缺/多笔越多、配对形状越差，分数越低。
+6. **排序**：所有参考字按分数降序取 `top_k`；**相同分数按字符升序稳定排序**，
+   每个候选都返回笔画对应关系（含各项指标）与缺笔/多笔惩罚明细。
+
 ### 分叉/转折笔画容差
 
 折、钩类复合笔画（如“┐”）在拐点处书写误差天然更大。引擎先在参考笔画上检测拐点
@@ -158,17 +255,20 @@ curl -X POST http://localhost:8000/v1/validate \
 | `TOL_FORK_EXTRA_SHAPE` | `0.08` | 分叉笔画额外形状容差 |
 | `CORNER_ANGLE_DEG` | `50` | 拐点判定最小转角（度） |
 | `RESAMPLE_POINTS` | `32` | 每笔重采样点数 |
+| `RECOG_MISSING_PENALTY` | `1.0` | 识别时缺一笔的代价（0..1） |
+| `RECOG_EXTRA_PENALTY` | `1.0` | 识别时多一笔的代价（0..1） |
 
 ## 项目结构
 
 ```
 app/
-├── main.py        # FastAPI 应用与路由（幂等流程）
+├── main.py        # FastAPI 应用与路由（识别 + 幂等校验流程）
 ├── models.py      # Pydantic 请求/响应模型
+├── recognition.py # 候选字识别引擎（代价矩阵 + 匈牙利全局一对一分配 + 缺/多笔惩罚）
 ├── validation.py  # 笔顺匹配引擎（方向/起止点/形状/错序/计分）
 ├── geometry.py    # 归一化、重采样、拐点检测
 ├── db.py          # SQLite 持久化（参考字 + 幂等提交）
 └── config.py      # 环境变量配置
-tests/test_api.py  # 21 个端到端用例
+tests/test_api.py  # 31 个端到端用例
 Dockerfile / docker-compose.yml
 ```

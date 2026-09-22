@@ -11,6 +11,9 @@ from fastapi import Depends, FastAPI, HTTPException, status
 from . import __version__, db as db_module
 from .config import settings
 from .models import (
+    RecognitionCandidate,
+    RecognizeRequest,
+    RecognizeResponse,
     ReferenceResponse,
     RegisterReferenceRequest,
     SubmissionRecord,
@@ -18,6 +21,7 @@ from .models import (
     ValidateRequest,
     ValidateResponse,
 )
+from .recognition import recognize_against
 from .validation import Tolerances as EngineTolerances
 from .validation import validate
 
@@ -63,6 +67,8 @@ def get_config():
         "fork_extra_shape": settings.fork_extra_shape,
         "corner_angle_deg": settings.corner_angle_deg,
         "resample_points": settings.resample_points,
+        "recognize_missing_penalty": settings.recognize_missing_penalty,
+        "recognize_extra_penalty": settings.recognize_extra_penalty,
     }
 
 
@@ -102,6 +108,45 @@ def get_reference(character: str, db: db_module.Database = Depends(get_db)):
     if record is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="参考字未注册")
     return record
+
+
+# ------------------------------------------------------------------ 识别
+
+@app.post(
+    "/v1/recognize",
+    response_model=RecognizeResponse,
+    tags=["recognition"],
+)
+def recognize(
+    req: RecognizeRequest, db: db_module.Database = Depends(get_db)
+):
+    """候选字识别：对未标注字符的笔画轨迹返回按置信度排序的参考字候选。
+
+    与每个已注册参考字在归一化后构建用户笔×参考笔代价矩阵，用全局
+    一对一最优分配容忍书写次序差异，缺笔/多笔按固定代价显式计入总分。
+    无注册参考字时返回空候选列表。
+    """
+    references = db.list_references()
+    canvas = tuple(req.canvas_size) if req.canvas_size else None
+
+    candidates = [
+        recognize_against(
+            record["character"],
+            reference_strokes=[[tuple(p) for p in s] for s in record["strokes"]],
+            user_strokes=[[tuple(p) for p in s] for s in req.strokes],
+            canvas_size=canvas,
+        )
+        for record in references
+    ]
+    # 置信度降序；相同分数按字符升序，保证同分稳定排序
+    candidates.sort(key=lambda c: (-c["score"], c["character"]))
+    top = candidates[: req.top_k]
+
+    return RecognizeResponse(
+        top_k=req.top_k,
+        total_references=len(references),
+        candidates=[RecognitionCandidate(**c) for c in top],
+    )
 
 
 # ------------------------------------------------------------------ 校验

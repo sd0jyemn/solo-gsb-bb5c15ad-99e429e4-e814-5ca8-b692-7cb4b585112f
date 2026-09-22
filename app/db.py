@@ -88,6 +88,26 @@ class Database:
             "updated_at": row["updated_at"],
         }
 
+    def list_references(self) -> list[dict]:
+        """列出全部已注册参考字，按字符排序（保证识别结果稳定）。"""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM reference_glyphs ORDER BY character ASC"
+            ).fetchall()
+        records = []
+        for row in rows:
+            strokes = json.loads(row["strokes"])
+            records.append(
+                {
+                    "character": row["character"],
+                    "stroke_count": len(strokes),
+                    "strokes": strokes,
+                    "source": row["source"],
+                    "updated_at": row["updated_at"],
+                }
+            )
+        return records
+
     # ------------------------------------------------------------ 幂等提交
 
     def get_submission(self, submission_id: str) -> Optional[dict]:
