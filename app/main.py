@@ -8,11 +8,17 @@ from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI, HTTPException, status
 
-from . import __version__, db as db_module
+from . import __version__, db as db_module, recognition
 from .config import settings
 from .models import (
+    PenaltyDetail,
+    RecognitionCandidate,
+    RecognitionStrokeMetrics,
+    RecognizeRequest,
+    RecognizeResponse,
     ReferenceResponse,
     RegisterReferenceRequest,
+    StrokeMatch,
     SubmissionRecord,
     Tolerances,
     ValidateRequest,
@@ -35,6 +41,9 @@ app = FastAPI(
         "接收汉字的参考笔画序列与用户书写轨迹，按笔画方向、起止点和书写顺序"
         "做归一化匹配，支持可配置的分叉/转折笔画容差，返回首个不合格笔画、"
         "偏差原因与整体得分。同一 submission_id 重复提交幂等。"
+        "另提供 POST /v1/recognize：对未标注字符的轨迹，在全部已注册参考字上"
+        "做全局一对一最优分配匹配（容忍书写次序差异，显式惩罚缺笔/多笔），"
+        "返回按置信度排序的候选字。"
     ),
     version=__version__,
     lifespan=lifespan,
@@ -63,6 +72,8 @@ def get_config():
         "fork_extra_shape": settings.fork_extra_shape,
         "corner_angle_deg": settings.corner_angle_deg,
         "resample_points": settings.resample_points,
+        "recognition_missing_penalty": settings.recognition_missing_penalty,
+        "recognition_extra_penalty": settings.recognition_extra_penalty,
     }
 
 
@@ -102,6 +113,74 @@ def get_reference(character: str, db: db_module.Database = Depends(get_db)):
     if record is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="参考字未注册")
     return record
+
+
+# ------------------------------------------------------------------ 识别
+
+@app.post(
+    "/v1/recognize",
+    response_model=RecognizeResponse,
+    tags=["recognition"],
+)
+def recognize_strokes(
+    req: RecognizeRequest, db: db_module.Database = Depends(get_db)
+):
+    """从未标注字符的笔画轨迹中识别候选字。
+
+    在全部已注册参考字上构建用户/参考笔画代价矩阵，以全局一对一最优分配
+    （匈牙利算法）容忍书写次序差异；缺笔/多笔作为显式惩罚计入总分。
+    返回按置信度降序的前 top_k 个候选，同分按字符稳定排序。
+    无任何已注册参考字时 candidates 为空列表。
+    """
+    references = db.list_references()
+
+    results = recognition.recognize(
+        user_strokes=[[tuple(p) for p in s] for s in req.strokes],
+        references=references,
+        top_k=req.top_k,
+    )
+
+    candidates = [
+        RecognitionCandidate(
+            character=cand.character,
+            confidence=cand.confidence,
+            total_cost=round(cand.total_cost, 4),
+            reference_stroke_count=(
+                len(cand.matches) + len(cand.missing_indices)
+            ),
+            user_stroke_count=len(cand.matches) + len(cand.extra_indices),
+            stroke_matches=[
+                StrokeMatch(
+                    user_index=m.user_index,
+                    reference_index=m.reference_index,
+                    cost=m.cost,
+                    metrics=RecognitionStrokeMetrics(**m.metrics),
+                )
+                for m in cand.matches
+            ],
+            penalties=PenaltyDetail(
+                missing_stroke_count=len(cand.missing_indices),
+                extra_stroke_count=len(cand.extra_indices),
+                missing_stroke_indices=list(cand.missing_indices),
+                extra_stroke_indices=list(cand.extra_indices),
+                missing_penalty_per_stroke=cand.missing_penalty,
+                extra_penalty_per_stroke=cand.extra_penalty,
+                missing_penalty_total=round(cand.missing_penalty_total, 4),
+                extra_penalty_total=round(cand.extra_penalty_total, 4),
+                penalty_total=round(
+                    cand.missing_penalty_total + cand.extra_penalty_total, 4
+                ),
+            ),
+        )
+        for cand in results
+    ]
+
+    return RecognizeResponse(
+        query_stroke_count=len(req.strokes),
+        reference_count=len(references),
+        top_k=req.top_k,
+        candidates=candidates,
+    )
 
 
 # ------------------------------------------------------------------ 校验

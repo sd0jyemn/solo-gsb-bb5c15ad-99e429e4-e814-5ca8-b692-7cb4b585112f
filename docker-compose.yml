@@ -13,6 +13,9 @@ services:
       TOL_FORK_EXTRA_SHAPE: "0.08"
       CORNER_ANGLE_DEG: "50"
       RESAMPLE_POINTS: "32"
+      # 候选字识别（/v1/recognize）的缺笔/多笔显式惩罚代价
+      RECOGNITION_MISSING_PENALTY: "0.6"
+      RECOGNITION_EXTRA_PENALTY: "0.6"
     volumes:
       - stroke-data:/data
     restart: unless-stopped

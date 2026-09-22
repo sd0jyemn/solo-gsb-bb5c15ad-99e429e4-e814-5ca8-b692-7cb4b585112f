@@ -83,6 +83,78 @@ class RegisterReferenceRequest(BaseModel):
     source: Optional[str] = Field(default=None, description="来源标注，如字体/字帖")
 
 
+# ------------------------------------------------------------------ 识别
+
+class RecognizeRequest(BaseModel):
+    """候选字识别请求：输入未标注字符的笔画轨迹。"""
+
+    strokes: list[Stroke] = Field(
+        min_length=1, description="用户书写轨迹（可按任意笔画次序书写）"
+    )
+    top_k: int = Field(
+        ge=1, description="返回候选字的最大数量（按置信度降序）"
+    )
+
+
+class RecognitionStrokeMetrics(BaseModel):
+    """识别中一对笔画的归一化偏差明细。"""
+
+    start_deviation: float
+    end_deviation: float
+    direction_deviation_deg: float
+    shape_deviation: float
+
+
+class StrokeMatch(BaseModel):
+    """识别出的单对笔画对应关系（全局一对一最优分配的结果）。"""
+
+    user_index: int = Field(description="用户笔画下标（0 起，按书写顺序）")
+    reference_index: int = Field(description="对应参考笔画下标（0 起）")
+    cost: float = Field(description="该笔匹配代价，0..1，越小越相似")
+    metrics: RecognitionStrokeMetrics
+
+
+class PenaltyDetail(BaseModel):
+    """缺笔/多笔的显式惩罚明细。"""
+
+    missing_stroke_count: int = Field(description="未书写的参考笔画数")
+    extra_stroke_count: int = Field(description="参考字中不存在的多余用户笔画数")
+    missing_stroke_indices: list[int] = Field(
+        default_factory=list, description="缺笔对应的参考笔画下标（0 起）"
+    )
+    extra_stroke_indices: list[int] = Field(
+        default_factory=list, description="多笔对应的用户笔画下标（0 起）"
+    )
+    missing_penalty_per_stroke: float = Field(description="每笔缺笔的惩罚代价")
+    extra_penalty_per_stroke: float = Field(description="每笔多笔的惩罚代价")
+    missing_penalty_total: float = Field(description="缺笔惩罚合计")
+    extra_penalty_total: float = Field(description="多笔惩罚合计")
+    penalty_total: float = Field(description="缺笔+多笔惩罚总计")
+
+
+class RecognitionCandidate(BaseModel):
+    """单个候选字。"""
+
+    character: str
+    confidence: float = Field(ge=0.0, le=1.0, description="置信度，越大越匹配")
+    total_cost: float = Field(description="全局最优分配的总代价（含缺/多笔惩罚）")
+    reference_stroke_count: int
+    user_stroke_count: int
+    stroke_matches: list[StrokeMatch] = Field(
+        description="配成功的笔画对（按用户笔画下标升序）"
+    )
+    penalties: PenaltyDetail
+
+
+class RecognizeResponse(BaseModel):
+    query_stroke_count: int
+    reference_count: int = Field(description="参与比对的已注册参考字数量")
+    top_k: int
+    candidates: list[RecognitionCandidate] = Field(
+        description="候选字列表，按置信度降序；同分按字符稳定排序"
+    )
+
+
 class StrokeMetrics(BaseModel):
     start_deviation: float
     end_deviation: float

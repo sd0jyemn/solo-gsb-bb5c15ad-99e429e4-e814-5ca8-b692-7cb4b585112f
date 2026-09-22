@@ -53,6 +53,14 @@ class Settings:
     resample_points: int = field(
         default_factory=lambda: int(_float_env("RESAMPLE_POINTS", 32))
     )
+    # 识别（/v1/recognize）中缺笔的显式惩罚代价（0..1，按缺笔数累计）
+    recognition_missing_penalty: float = field(
+        default_factory=lambda: _float_env("RECOGNITION_MISSING_PENALTY", 0.6)
+    )
+    # 识别中多笔的显式惩罚代价（0..1，按多笔数累计）
+    recognition_extra_penalty: float = field(
+        default_factory=lambda: _float_env("RECOGNITION_EXTRA_PENALTY", 0.6)
+    )
 
 
 settings = Settings()
